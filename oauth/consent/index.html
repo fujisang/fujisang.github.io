@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kizamu — 接続の許可</title>
+<meta name="robots" content="noindex">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Shippori+Mincho+B1:wght@500&family=Zen+Kaku+Gothic+New:wght@400;500&display=swap">
+<link rel="stylesheet" href="/tokens.css">
+<style>
+  body { min-height:100vh; display:grid; place-items:center; padding:var(--space-2); }
+  main { width:100%; max-width:420px; }
+  .wordmark { display:block; margin-bottom:var(--space-3); }
+  h1 { font:500 24px/1.6 var(--font-serif); letter-spacing:.04em; margin:0 0 var(--space-2); }
+  .card { border:1px solid var(--line); border-radius:var(--radius-none); background:var(--surface-raised); padding:var(--space-3); }
+  .card p { margin:0 0 var(--space-2); }
+  ul { padding-left:1.2em; margin:0 0 var(--space-2); }
+  .row { display:flex; gap:12px; margin-top:var(--space-3); }
+  button { flex:1; font:500 15px/1.4 var(--font-sans); padding:14px; border-radius:var(--radius-pill); border:1px solid var(--line-strong); background:transparent; color:var(--ink); cursor:pointer; }
+  button.primary { background:var(--ink); color:var(--on-ink); border-color:var(--ink); }
+  button:disabled { opacity:.4; cursor:default; }
+  .muted { color:var(--ink-muted); font-size:13px; line-height:1.7; }
+  .err { color:var(--danger); }
+</style>
+</head>
+<body>
+<main>
+  <span class="wordmark">Kizamu</span>
+  <h1>日記へのアクセスの許可</h1>
+  <div class="card" id="app"><p class="muted">読み込み中…</p></div>
+</main>
+<script type="module">
+  import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/+esm";
+
+  // 公開してよい値（Supabase の URL と publishable key）。権限は RLS と OAuth で制御される
+  const supabase = createClient(
+    "https://qvmarkvwpkavliqfjcym.supabase.co",
+    "sb_publishable_17-YqxKbkEkVX11Bi7zRqg_QyibKbnV",
+  );
+  const app = document.getElementById("app");
+  const params = new URLSearchParams(location.search);
+  const authorizationId = params.get("authorization_id");
+
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+  const show = (html) => { app.innerHTML = html; };
+  const fail = (msg) => show(`<p class="err">${esc(msg)}</p><p class="muted">この画面を閉じて、接続をやり直してください。</p>`);
+
+  async function main() {
+    if (!authorizationId) return fail("authorization_id がありません。");
+
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) {
+      show(`<p>接続を許可するには、Kizamu のアカウントでログインしてください。</p>
+            <div class="row"><button class="primary" id="login">Google でログイン</button></div>`);
+      document.getElementById("login").onclick = () =>
+        supabase.auth.signInWithOAuth({ provider: "google", options: { redirectTo: location.href } });
+      return;
+    }
+
+    const { data, error } = await supabase.auth.oauth.getAuthorizationDetails(authorizationId);
+    if (error) return fail("認可リクエストを読み込めませんでした。");
+    if ("redirect_url" in data && !("authorization_id" in data)) {
+      location.href = data.redirect_url; // 以前に許可済み
+      return;
+    }
+
+    const client = data.client ?? {};
+    show(`<p><strong>${esc(client.name || "不明なアプリ")}</strong> が、あなたの Kizamu の日記を読み取ろうとしています。</p>
+          <ul>
+            <li>日記の検索と、本文の読み取り（読み取りのみ。書き換え・削除はできません）</li>
+            <li>読み取った日記の本文は、このアプリ（AIの提供元）に送られます</li>
+          </ul>
+          <p class="muted">ログイン中: ${esc(data.user?.email)}<br>接続先: ${esc(data.redirect_uri)}</p>
+          <div class="row">
+            <button id="deny">許可しない</button>
+            <button class="primary" id="approve">許可する</button>
+          </div>`);
+    const lock = () => document.querySelectorAll("button").forEach((b) => (b.disabled = true));
+    document.getElementById("approve").onclick = async () => {
+      lock();
+      const { error } = await supabase.auth.oauth.approveAuthorization(authorizationId);
+      if (error) fail("許可の処理に失敗しました。");
+    };
+    document.getElementById("deny").onclick = async () => {
+      lock();
+      const { error } = await supabase.auth.oauth.denyAuthorization(authorizationId);
+      if (error) fail("処理に失敗しました。");
+    };
+  }
+  main().catch(() => fail("エラーが発生しました。"));
+</script>
+</body>
+</html>

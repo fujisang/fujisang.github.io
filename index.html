@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kizamu — 手書きの日記を、あとから探せるように。</title>
+<meta name="description" content="紙に書いた日記を iPhone で撮るだけ。Kizamu が文字にして、あとから Claude に聞けるようにします。">
+<script src="/theme.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Klee+One&family=Shippori+Mincho+B1:wght@500&family=Zen+Kaku+Gothic+New:wght@400;500&display=swap">
+<link rel="stylesheet" href="/tokens.css">
+<style>
+  #fluid { position: fixed; inset: 0; width: 100%; height: 100%; z-index: -1; pointer-events: none; }
+  .wrap { width: 100%; max-width: 880px; margin: 0 auto; padding: 0 var(--space-2); }
+
+  /* 上のバーは画面に追従する。ウェイトリストへの入口を常に出しておく */
+  :root { --bar-h: 56px; }
+  html { scroll-behavior: smooth; }
+  .top { position: sticky; top: 0; z-index: 5; height: var(--bar-h); background: var(--surface); border-bottom: 1px solid var(--line); }
+  .top .wrap { height: 100%; display: flex; justify-content: space-between; align-items: center; gap: var(--space-2); }
+  .top-actions { display: flex; align-items: center; gap: var(--space-2); }
+  .top-cta { padding: 8px 16px; border-radius: var(--radius-pill); background: var(--ink); color: var(--on-ink); font: 500 12px/1 var(--font-sans); letter-spacing: .08em; text-decoration: none; white-space: nowrap; }
+  #waitlist { scroll-margin-top: calc(var(--bar-h) + var(--space-3)); }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+
+  .hero { padding: var(--space-4) 0 0; }
+  h1 { font: 500 clamp(32px, 6.4vw, 56px)/1.3 var(--font-serif); letter-spacing: .04em; margin: 0; }
+  h1, h2 { word-break: keep-all; overflow-wrap: anywhere; }
+
+  /* 紙面：罫線は CSS、インクは canvas（ink.js）。罫線の間隔は ink.js の LH・PAD と合わせる */
+  .paper { margin-top: var(--space-4); border-top: 1px solid var(--ink); }
+  #ink { display: block; width: 100%; height: 248px; touch-action: pan-y; cursor: crosshair;
+         background: repeating-linear-gradient(to bottom, transparent 0 55px, var(--line) 55px 56px) 0 24px / 100% calc(100% - 48px) no-repeat; }
+  .paper-foot { display: flex; justify-content: flex-end; gap: var(--space-2); padding-top: var(--space-1); border-top: 1px solid var(--line); }
+  .text-button { font: inherit; font-size: 13px; color: var(--ink-muted); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; text-underline-offset: 4px; }
+  .text-button:hover { color: var(--ink); }
+
+  section { padding: var(--space-4) 0 0; }
+  h2 { font: 500 24px/1.6 var(--font-serif); letter-spacing: .04em; margin: var(--space-1) 0 var(--space-3); }
+
+  /* スクロールで図と説明が 1 ステップずつ切り替わる。図は画面に固定し、文だけが流れる */
+  .story-grid { display: grid; }
+  .story-figure { position: sticky; top: var(--bar-h); height: 44vh; background: var(--surface); border-bottom: 1px solid var(--line); z-index: 1; }
+  .fig { position: absolute; inset: 0; width: 100%; height: 100%; padding: var(--space-2); fill: none; stroke: var(--ink); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round;
+         opacity: 0; transform: scale(.96); transition: opacity .6s ease, transform .8s cubic-bezier(.2,.8,.2,1); }
+  .fig.active { opacity: 1; transform: none; }
+  .fig .rule { stroke: var(--line); }
+  .fig .hand { stroke-width: 2; }
+  .fig .solid { fill: var(--surface); }
+  .fig .block { fill: var(--ink); stroke: none; }
+  .fig .band { fill: var(--ink); stroke: none; opacity: .12; }
+  .fig .flow { stroke-dasharray: 3 5; }
+  .fig .page-text { stroke-width: 1; }
+  .fig .dot { fill: var(--ink); stroke: none; transform-box: fill-box; transform-origin: center; }
+  /* 図は .active が付くたびに最初から再生される。--d は始まるまでの秒数、--t は長さ */
+  .fig .draw { stroke-dasharray: 1; stroke-dashoffset: 1; }
+  .fig .pop, .fig .fade-in, .fig .writer, .fig .scan, .fig .dot, .fig .page-drop { opacity: 0; }
+  .fig.active .draw { animation: draw var(--t, 1.2s) linear var(--d, 0s) forwards; }
+  .fig.active .pop { animation: pop .7s cubic-bezier(.2,.8,.2,1) var(--d, 0s) forwards; }
+  .fig.active .fade-in { animation: fade-in .4s ease var(--d, 0s) forwards; }
+  .fig.active .fade-out { animation: fade-out .4s ease var(--d, 0s) forwards; }
+  .fig.active .writer { animation: write 4.2s linear 1.6s both; }
+  .fig.active .scan { animation: scan var(--t) linear var(--d) forwards; }
+  .fig.active .dot { animation: dot .5s ease-out calc(1.4s + var(--i) * 45ms) forwards; }
+  .fig.active .page-drop { animation: drop 2.7s ease-in var(--d) infinite; }
+  @keyframes draw { to { stroke-dashoffset: 0; } }
+  @keyframes pop { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+  @keyframes fade-in { to { opacity: 1; } }
+  @keyframes fade-out { to { opacity: 0; } }
+  @keyframes dot { from { opacity: 0; transform: scale(0); } to { opacity: 1; transform: scale(1); } }
+  @keyframes drop { 0% { opacity: 0; transform: translateY(-110px); } 15% { opacity: 1; } 75% { opacity: 1; transform: translateY(20px); } 100% { opacity: 0; transform: translateY(40px); } }
+  @keyframes scan { 0% { opacity: 1; transform: none; } 92% { opacity: 1; } 100% { opacity: 0; transform: translateY(196px); } }
+  /* 手とペンは一筆書きの線 1 本。原点がペン先で、線で描かれてから、各行の書き始めから書き終わりへ動く（行の位置は図の中の字の線と合わせる） */
+  .fig .one-line { stroke-width: 2.4; }
+  @keyframes write {
+    0% { opacity: 1; transform: translate(74px, 112px); }
+    28% { opacity: 1; transform: translate(200px, 112px); }
+    32% { opacity: 1; transform: translate(74px, 147px); }
+    62% { opacity: 1; transform: translate(214px, 147px); }
+    66% { opacity: 1; transform: translate(74px, 182px); }
+    96% { opacity: 1; transform: translate(178px, 182px); }
+    100% { opacity: 1; transform: translate(190px, 172px); }
+  }
+  .story-steps { list-style: none; margin: 0; padding: 0; }
+  .story-steps li { min-height: 56vh; display: flex; flex-direction: column; justify-content: center; opacity: .25; transition: opacity .5s ease; }
+  .story-steps li.active { opacity: 1; }
+  .story-steps h3 { font: 500 clamp(28px, 5vw, 40px)/1.4 var(--font-serif); letter-spacing: .04em; margin: var(--space-1) 0 var(--space-2); }
+  .story-steps p { margin: 0; max-width: 24em; }
+  @media (min-width: 720px) {
+    .story-grid { grid-template-columns: 1fr 1fr; gap: var(--space-4); align-items: start; }
+    .story-figure { top: 14vh; height: 72vh; background: none; border: 0; }
+    .story-steps li { min-height: 100vh; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .fig, .story-steps li { transition: none; }
+    .fig .draw { stroke-dashoffset: 0; }
+    .fig * { animation: none !important; }
+    .fig .pop, .fig .fade-in, .fig .dot { opacity: 1; }
+    .fig .fade-out { opacity: 0; }
+    .fig .writer { opacity: 1; transform: translate(190px, 172px); }
+  }
+
+  /* Vision：見出しの横の矢印で開く。右から入ってきて、Write / Stack を左に押し縮める */
+  .hero-head { --t: .6s cubic-bezier(.2, .7, .2, 1); display: flex; align-items: flex-start; container-type: inline-size; transition: margin-top var(--t); }
+  .hero-title { flex: 1 1 0; min-width: 0; display: flex; align-items: flex-end; gap: var(--space-2); }
+  .hero-title h1 { transition: font-size var(--t); }
+  .hero-head.open h1 { font-size: clamp(26px, 4.4vw, 40px); }
+  .vision-toggle { flex: 0 0 auto; width: 44px; height: 44px; margin-bottom: 10px; padding: 0; border: 1px solid var(--ink); border-radius: var(--radius-pill); background: none; color: var(--ink); cursor: pointer; display: grid; place-items: center; transition: margin-bottom var(--t); }
+  .vision-toggle svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; transition: transform var(--t); }
+  .hero-head.open .vision-toggle { margin-bottom: 2px; }
+  .hero-head.open .vision-toggle svg { transform: rotate(180deg); }
+  .vision { flex: 0 0 auto; width: 0; display: grid; grid-template-rows: 0fr; overflow: hidden; visibility: hidden; transition: width var(--t), grid-template-rows var(--t), visibility 0s .6s; }
+  .vision:focus { outline: none; }
+  .hero-head.open .vision { width: 62%; grid-template-rows: 1fr; visibility: visible; transition-delay: 0s; }
+  /* 幅を固定しておき、開く途中で文字が折り返し直さないようにする */
+  .vision-inner { min-height: 0; overflow: hidden; width: 62cqw; padding-left: var(--space-3); border-left: 1px solid var(--ink); box-sizing: border-box; opacity: 0; transform: translateX(48px); transition: opacity var(--t), transform var(--t); }
+  .hero-head.open .vision-inner { opacity: 1; transform: none; }
+  .vision-inner .label { margin: 0; }
+  .vision-body { margin: 0 0 var(--space-2); max-width: 30em; }
+  /* スマホ幅：横に分けず、下から入ってきて Write / Stack を上に押し上げる */
+  @media (max-width: 719px) {
+    .hero-head { flex-direction: column; align-items: stretch; }
+    .hero-title { flex: 0 0 auto; }
+    .hero-head.open { margin-top: calc(var(--space-3) * -2); }
+    .vision, .hero-head.open .vision { width: 100%; }
+    .vision-inner { width: auto; padding-left: 0; border-left: 0; transform: translateY(32px); }
+    .hero-head.open .vision-inner { margin-top: var(--space-3); padding-top: var(--space-2); border-top: 1px solid var(--ink); }
+    .vision-toggle svg { transform: rotate(90deg); }
+    .hero-head.open .vision-toggle svg { transform: rotate(-90deg); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .hero-head, .hero-head * { transition: none !important; }
+  }
+
+  .soon { display: inline-block; margin-top: var(--space-3); padding: 12px 28px; border-radius: var(--radius-pill); background: var(--ink); color: var(--on-ink); font-size: 14px; letter-spacing: .08em; }
+
+  .waitlist { margin-top: var(--space-4); padding-top: var(--space-2); border-top: 1px solid var(--ink); }
+  .waitlist form { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: flex-end; }
+  .waitlist input { flex: 1 1 240px; min-width: 0; font: inherit; color: var(--ink); background: none; border: 0; border-bottom: 1px solid var(--line-strong); border-radius: 0; padding: 10px 0; }
+  .waitlist input:focus { outline: none; border-bottom-color: var(--ink); }
+  .waitlist input::placeholder { color: var(--ink-muted); }
+  .waitlist button { flex: 0 0 auto; margin: 0; border: 0; font: inherit; font-size: 14px; cursor: pointer; }
+  .waitlist button:disabled { opacity: .5; cursor: default; }
+  .waitlist .caption { margin: var(--space-1) 0 0; }
+  .waitlist .caption.error { color: var(--danger); }
+  .waitlist.done form { display: none; }
+  .visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+
+  footer a { color: inherit; }
+  footer { margin-top: var(--space-4); padding: var(--space-3) 0; border-top: 1px solid var(--line); display: flex; justify-content: space-between; flex-wrap: wrap; gap: var(--space-1); }
+</style>
+</head>
+<body>
+<canvas id="fluid" data-mode="background" aria-hidden="true"></canvas>
+<header class="top">
+  <div class="wrap">
+    <span class="wordmark">Kizamu</span>
+    <div class="top-actions">
+      <div class="theme-switch" role="group" aria-label="背景">
+        <button type="button" data-set-theme="light">白</button>
+        <button type="button" data-set-theme="dark">黒</button>
+      </div>
+      <a class="top-cta" href="#waitlist">ウェイトリスト</a>
+    </div>
+  </div>
+</header>
+<div class="wrap">
+
+  <main>
+    <div class="hero">
+      <div class="hero-head">
+        <div class="hero-title">
+          <h1>Write<br>Stack</h1>
+          <button class="vision-toggle" type="button" aria-expanded="false" aria-controls="vision-panel" aria-label="Vision を開く">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12H20M14 6L20 12L14 18"/></svg>
+          </button>
+        </div>
+        <div class="vision" id="vision-panel" role="region" aria-labelledby="vision" tabindex="-1" inert>
+          <div class="vision-inner">
+            <p class="label">Vision</p>
+            <h2 id="vision">書き続けた<wbr>日記が<wbr>積み重なり、<wbr>そのデータが<wbr>「あなた」を<wbr>形作っていく。</h2>
+            <p class="vision-body">Kizamu が目指すのは、その形作られた「あなた」が、このサービスの枠を超えて、あなたの情報を提供し、あなたを支える存在になること。</p>
+            <button class="text-button vision-close" type="button">閉じる</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <section class="story" aria-labelledby="how">
+      <p class="label">How it works</p>
+      <h2 id="how">書くだけで、<wbr>残っていく。</h2>
+      <div class="story-grid">
+        <div class="story-figure" aria-hidden="true">
+          <svg class="fig" data-fig="1" viewBox="0 0 320 320">
+            <g class="pop" style="--d:0s">
+              <rect x="50" y="56" width="200" height="228"/>
+              <path class="rule" d="M70 115H230M70 150H230M70 185H230M70 220H230M70 255H230"/>
+            </g>
+            <path class="draw hand" style="--d:1.60s;--t:1.18s" pathLength="1" d="M74 112q6.0 -8 12 0q6.0 9 12 0q6.0 8 12 0q6.0 -9 12 0q7.0 6 14 0q5.0 6 10 0q7.0 -9 14 0q6.0 -6 12 0q7.0 8 14 0q7.0 6 14 0"/>
+            <path class="draw hand" style="--d:2.94s;--t:1.26s" pathLength="1" d="M74 147q5.0 -9 10 0q6.0 6 12 0q6.0 8 12 0q5.0 6 10 0q5.0 8 10 0q7.0 6 14 0q6.0 -9 12 0q7.0 6 14 0q5.0 -6 10 0q7.0 -9 14 0q6.0 -9 12 0q6.0 -9 12 0"/>
+            <path class="draw hand" style="--d:4.37s;--t:1.26s" pathLength="1" d="M74 182q5.0 -6 10 0q6.0 6 12 0q6.0 -9 12 0q7.0 -6 14 0q6.0 9 12 0q7.0 9 14 0q7.0 8 14 0q5.0 6 10 0q6.0 8 12 0"/>
+            <g class="writer">
+              <path class="draw one-line" style="--d:.3s;--t:1.3s" pathLength="1" transform="scale(.8)" d="M190 52 L138 20 C124 12 112 -14 96 -26 C84 -36 70 -44 58 -42 C46 -42 38 -44 33 -40 L72 -86 l8 7 L11 -4 L0 0 L4 -9 L28 -36 C20 -30 22 -18 32 -16 C40 -12 48 -6 50 2 C40 2 30 6 30 14 C30 22 42 22 50 16 C46 26 52 36 64 32 C60 44 70 52 80 46 C78 58 90 64 98 56 C112 62 124 70 136 80 L184 108"/>
+            </g>
+          </svg>
+          <svg class="fig" data-fig="2" viewBox="0 0 320 320">
+            <rect class="pop" style="--d:0s" x="84" y="56" width="152" height="212"/>
+            <path class="hand fade-out" style="--d:1.24s" d="M100 92q7.0 6 14 0q6.0 -9 12 0q5.0 8 10 0q6.0 -9 12 0q5.0 9 10 0q6.0 -6 12 0q7.0 -8 14 0q6.0 6 12 0"/>
+            <path class="hand fade-out" style="--d:1.63s" d="M100 124q6.0 9 12 0q6.0 -9 12 0q5.0 9 10 0q7.0 -9 14 0q5.0 8 10 0q5.0 -6 10 0q7.0 8 14 0q7.0 -9 14 0q7.0 -6 14 0q5.0 -6 10 0"/>
+            <path class="hand fade-out" style="--d:2.03s" d="M100 156q6.0 8 12 0q5.0 -8 10 0q6.0 8 12 0q7.0 -8 14 0q7.0 -6 14 0q6.0 -8 12 0q6.0 -6 12 0q7.0 -6 14 0"/>
+            <path class="hand fade-out" style="--d:2.42s" d="M100 188q6.0 -8 12 0q7.0 -6 14 0q5.0 -9 10 0q5.0 -6 10 0q7.0 -8 14 0q6.0 -6 12 0q6.0 -6 12 0q6.0 8 12 0q5.0 8 10 0q5.0 8 10 0q7.0 8 14 0"/>
+            <path class="hand fade-out" style="--d:2.81s" d="M100 220q5.0 -9 10 0q6.0 9 12 0q6.0 -9 12 0q7.0 8 14 0q6.0 9 12 0q6.0 6 12 0q5.0 8 10 0q6.0 -8 12 0q5.0 9 10 0q5.0 -6 10 0q5.0 9 10 0"/>
+            <g class="block fade-in" style="--d:1.24s"><rect x="100" y="87" width="20" height="6"/><rect x="126" y="87" width="26" height="6"/><rect x="158" y="87" width="32" height="6"/><rect x="196" y="87" width="14" height="6"/></g>
+            <g class="block fade-in" style="--d:1.63s"><rect x="100" y="119" width="14" height="6"/><rect x="120" y="119" width="32" height="6"/><rect x="158" y="119" width="26" height="6"/><rect x="190" y="119" width="20" height="6"/></g>
+            <g class="block fade-in" style="--d:2.03s"><rect x="100" y="151" width="32" height="6"/><rect x="138" y="151" width="32" height="6"/><rect x="176" y="151" width="32" height="6"/></g>
+            <g class="block fade-in" style="--d:2.42s"><rect x="100" y="183" width="20" height="6"/><rect x="126" y="183" width="20" height="6"/><rect x="152" y="183" width="20" height="6"/><rect x="178" y="183" width="32" height="6"/></g>
+            <g class="block fade-in" style="--d:2.81s"><rect x="100" y="215" width="14" height="6"/><rect x="120" y="215" width="14" height="6"/><rect x="140" y="215" width="20" height="6"/><rect x="166" y="215" width="14" height="6"/><rect x="186" y="215" width="26" height="6"/></g>
+            <path class="draw" style="--d:.2s;--t:.6s" pathLength="1" d="M64 66V40H90M230 40H256V66M256 258V284H230M90 284H64V258"/>
+            <g class="scan" style="--d:0.9s;--t:2.4s">
+              <rect class="band" x="70" y="46" width="180" height="18"/>
+              <path d="M62 64H258"/>
+            </g>
+          </svg>
+          <svg class="fig" data-fig="3" viewBox="0 0 320 320">
+            <g class="page-drop" style="--d:0.0s"><rect class="solid" x="74" y="124" width="32" height="44"/><path class="page-text" d="M80 134H100M80 142H100M80 150H100M80 158H94"/></g><g class="page-drop" style="--d:0.9s"><rect class="solid" x="74" y="124" width="32" height="44"/><path class="page-text" d="M80 134H100M80 142H100M80 150H100M80 158H94"/></g><g class="page-drop" style="--d:1.8s"><rect class="solid" x="74" y="124" width="32" height="44"/><path class="page-text" d="M80 134H100M80 142H100M80 150H100M80 158H94"/></g>
+            <g class="pop" style="--d:0s">
+              <path class="solid" d="M40 190v72c0 8 22 15 50 15s50-7 50-15v-72"/>
+              <ellipse class="solid" cx="90" cy="190" rx="50" ry="15"/>
+              <path d="M40 214c0 8 22 15 50 15s50-7 50-15M40 238c0 8 22 15 50 15s50-7 50-15"/>
+            </g>
+            <path class="flow" d="M146 226H176"/>
+            <circle class="dot" style="--i:0" cx="277.3" cy="250.9" r="2.2"/><circle class="dot" style="--i:1" cx="222.5" cy="242.2" r="2.2"/><circle class="dot" style="--i:2" cx="267.4" cy="233.4" r="2.2"/><circle class="dot" style="--i:3" cx="205.7" cy="116.4" r="2.2"/><circle class="dot" style="--i:4" cx="194.7" cy="224.1" r="2.2"/><circle class="dot" style="--i:5" cx="230.6" cy="213.5" r="2.2"/><circle class="dot" style="--i:6" cx="178.2" cy="196.2" r="2.2"/><circle class="dot" style="--i:7" cx="233.3" cy="169.8" r="2.2"/><circle class="dot" style="--i:8" cx="241.4" cy="178.7" r="2.2"/><circle class="dot" style="--i:9" cx="241.9" cy="194.7" r="2.2"/><circle class="dot" style="--i:10" cx="240.2" cy="113.6" r="2.2"/><circle class="dot" style="--i:11" cx="224.1" cy="116.1" r="2.2"/><circle class="dot" style="--i:12" cx="276.6" cy="224.1" r="2.2"/><circle class="dot" style="--i:13" cx="276.1" cy="240.7" r="2.2"/><circle class="dot" style="--i:14" cx="203.9" cy="195.9" r="2.2"/><circle class="dot" style="--i:15" cx="266.6" cy="212.7" r="2.2"/><circle class="dot" style="--i:16" cx="205.4" cy="96.4" r="2.2"/><circle class="dot" style="--i:17" cx="240.9" cy="133.5" r="2.2"/><circle class="dot" style="--i:18" cx="286.1" cy="222.0" r="2.2"/><circle class="dot" style="--i:19" cx="223.8" cy="251.2" r="2.2"/><circle class="dot" style="--i:20" cx="250.5" cy="240.6" r="2.2"/><circle class="dot" style="--i:21" cx="231.9" cy="221.6" r="2.2"/><circle class="dot" style="--i:22" cx="213.1" cy="241.0" r="2.2"/><circle class="dot" style="--i:23" cx="240.5" cy="213.5" r="2.2"/><circle class="dot" style="--i:24" cx="250.0" cy="197.5" r="2.2"/><circle class="dot" style="--i:25" cx="278.2" cy="194.8" r="2.2"/><circle class="dot" style="--i:26" cx="205.0" cy="240.9" r="2.2"/><circle class="dot" style="--i:27" cx="231.6" cy="140.8" r="2.2"/><circle class="dot" style="--i:28" cx="250.8" cy="251.0" r="2.2"/><circle class="dot" style="--i:29" cx="250.4" cy="106.3" r="2.2"/><circle class="dot" style="--i:30" cx="241.0" cy="205.1" r="2.2"/><circle class="dot" style="--i:31" cx="195.5" cy="230.6" r="2.2"/><circle class="dot" style="--i:32" cx="239.6" cy="249.0" r="2.2"/><circle class="dot" style="--i:33" cx="186.3" cy="214.5" r="2.2"/><circle class="dot" style="--i:34" cx="224.5" cy="167.7" r="2.2"/><circle class="dot" style="--i:35" cx="222.1" cy="97.8" r="2.2"/><circle class="dot" style="--i:36" cx="215.4" cy="105.4" r="2.2"/><circle class="dot" style="--i:37" cx="221.8" cy="89.4" r="2.2"/><circle class="dot" style="--i:38" cx="257.8" cy="250.6" r="2.2"/><circle class="dot" style="--i:39" cx="240.9" cy="240.6" r="2.2"/><circle class="dot" style="--i:40" cx="195.0" cy="213.9" r="2.2"/><circle class="dot" style="--i:41" cx="213.8" cy="204.7" r="2.2"/><circle class="dot" style="--i:42" cx="213.3" cy="196.6" r="2.2"/><circle class="dot" style="--i:43" cx="186.7" cy="194.8" r="2.2"/><circle class="dot" style="--i:44" cx="285.2" cy="204.0" r="2.2"/><circle class="dot" style="--i:45" cx="258.5" cy="179.2" r="2.2"/><circle class="dot" style="--i:46" cx="186.1" cy="250.9" r="2.2"/><circle class="dot" style="--i:47" cx="258.1" cy="116.2" r="2.2"/><circle class="dot" style="--i:48" cx="187.4" cy="239.8" r="2.2"/><circle class="dot" style="--i:49" cx="250.1" cy="133.4" r="2.2"/><circle class="dot" style="--i:50" cx="195.3" cy="179.2" r="2.2"/><circle class="dot" style="--i:51" cx="250.8" cy="123.2" r="2.2"/><circle class="dot" style="--i:52" cx="259.8" cy="241.4" r="2.2"/><circle class="dot" style="--i:53" cx="212.6" cy="214.4" r="2.2"/><circle class="dot" style="--i:54" cx="268.2" cy="188.3" r="2.2"/><circle class="dot" style="--i:55" cx="268.5" cy="196.2" r="2.2"/><circle class="dot" style="--i:56" cx="241.7" cy="185.9" r="2.2"/><circle class="dot" style="--i:57" cx="214.7" cy="177.5" r="2.2"/><circle class="dot" style="--i:58" cx="268.9" cy="222.3" r="2.2"/><circle class="dot" style="--i:59" cx="179.3" cy="249.6" r="2.2"/><circle class="dot" style="--i:60" cx="224.2" cy="233.1" r="2.2"/><circle class="dot" style="--i:61" cx="258.8" cy="106.1" r="2.2"/><circle class="dot" style="--i:62" cx="240.1" cy="231.5" r="2.2"/><circle class="dot" style="--i:63" cx="260.0" cy="214.8" r="2.2"/><circle class="dot" style="--i:64" cx="195.5" cy="187.2" r="2.2"/><circle class="dot" style="--i:65" cx="212.9" cy="131.5" r="2.2"/><circle class="dot" style="--i:66" cx="242.1" cy="167.6" r="2.2"/><circle class="dot" style="--i:67" cx="233.0" cy="96.3" r="2.2"/><circle class="dot" style="--i:68" cx="259.3" cy="232.9" r="2.2"/><circle class="dot" style="--i:69" cx="223.7" cy="133.9" r="2.2"/><circle class="dot" style="--i:70" cx="233.3" cy="124.0" r="2.2"/><circle class="dot" style="--i:71" cx="195.3" cy="194.7" r="2.2"/><circle class="dot" style="--i:72" cx="241.9" cy="95.8" r="2.2"/><circle class="dot" style="--i:73" cx="185.8" cy="188.3" r="2.2"/><circle class="dot" style="--i:74" cx="203.6" cy="177.9" r="2.2"/><circle class="dot" style="--i:75" cx="233.3" cy="195.8" r="2.2"/><circle class="dot" style="--i:76" cx="177.8" cy="239.8" r="2.2"/><circle class="dot" style="--i:77" cx="285.1" cy="212.7" r="2.2"/><circle class="dot" style="--i:78" cx="206.2" cy="122.9" r="2.2"/><circle class="dot" style="--i:79" cx="278.5" cy="215.5" r="2.2"/><circle class="dot" style="--i:80" cx="251.2" cy="170.2" r="2.2"/><circle class="dot" style="--i:81" cx="250.9" cy="98.4" r="2.2"/><circle class="dot" style="--i:82" cx="205.2" cy="170.2" r="2.2"/><circle class="dot" style="--i:83" cx="249.8" cy="222.6" r="2.2"/><circle class="dot" style="--i:84" cx="268.5" cy="249.5" r="2.2"/><circle class="dot" style="--i:85" cx="223.0" cy="197.1" r="2.2"/><circle class="dot" style="--i:86" cx="203.8" cy="215.3" r="2.2"/><circle class="dot" style="--i:87" cx="232.6" cy="251.3" r="2.2"/><circle class="dot" style="--i:88" cx="287.4" cy="232.0" r="2.2"/><circle class="dot" style="--i:89" cx="196.5" cy="239.6" r="2.2"/><circle class="dot" style="--i:90" cx="205.6" cy="231.2" r="2.2"/><circle class="dot" style="--i:91" cx="230.9" cy="160.8" r="2.2"/><circle class="dot" style="--i:92" cx="212.6" cy="232.0" r="2.2"/><circle class="dot" style="--i:93" cx="214.0" cy="185.7" r="2.2"/><circle class="dot" style="--i:94" cx="250.6" cy="206.2" r="2.2"/><circle class="dot" style="--i:95" cx="186.0" cy="204.0" r="2.2"/><circle class="dot" style="--i:96" cx="188.0" cy="231.7" r="2.2"/><circle class="dot" style="--i:97" cx="259.4" cy="169.8" r="2.2"/><circle class="dot" style="--i:98" cx="179.3" cy="212.8" r="2.2"/><circle class="dot" style="--i:99" cx="284.7" cy="250.3" r="2.2"/><circle class="dot" style="--i:100" cx="250.6" cy="212.7" r="2.2"/><circle class="dot" style="--i:101" cx="258.9" cy="185.8" r="2.2"/><circle class="dot" style="--i:102" cx="233.2" cy="204.4" r="2.2"/><circle class="dot" style="--i:103" cx="258.7" cy="224.4" r="2.2"/><circle class="dot" style="--i:104" cx="197.1" cy="204.6" r="2.2"/><circle class="dot" style="--i:105" cx="275.8" cy="205.8" r="2.2"/><circle class="dot" style="--i:106" cx="212.6" cy="222.9" r="2.2"/><circle class="dot" style="--i:107" cx="231.2" cy="231.7" r="2.2"/><circle class="dot" style="--i:108" cx="232.8" cy="240.5" r="2.2"/><circle class="dot" style="--i:109" cx="250.0" cy="176.9" r="2.2"/><circle class="dot" style="--i:110" cx="278.3" cy="232.9" r="2.2"/><circle class="dot" style="--i:111" cx="233.1" cy="105.5" r="2.2"/><circle class="dot" style="--i:112" cx="248.8" cy="233.2" r="2.2"/><circle class="dot" style="--i:113" cx="232.2" cy="131.6" r="2.2"/><circle class="dot" style="--i:114" cx="213.2" cy="123.3" r="2.2"/><circle class="dot" style="--i:115" cx="267.7" cy="242.3" r="2.2"/><circle class="dot" style="--i:116" cx="240.3" cy="224.0" r="2.2"/><circle class="dot" style="--i:117" cx="241.4" cy="88.6" r="2.2"/><circle class="dot" style="--i:118" cx="178.9" cy="205.1" r="2.2"/><circle class="dot" style="--i:119" cx="242.0" cy="104.8" r="2.2"/><circle class="dot" style="--i:120" cx="186.7" cy="222.9" r="2.2"/><circle class="dot" style="--i:121" cx="204.1" cy="223.0" r="2.2"/><circle class="dot" style="--i:122" cx="214.3" cy="96.0" r="2.2"/><circle class="dot" style="--i:123" cx="205.9" cy="104.6" r="2.2"/><circle class="dot" style="--i:124" cx="205.6" cy="249.5" r="2.2"/><circle class="dot" style="--i:125" cx="250.9" cy="115.0" r="2.2"/><circle class="dot" style="--i:126" cx="232.7" cy="187.4" r="2.2"/><circle class="dot" style="--i:127" cx="221.6" cy="177.5" r="2.2"/><circle class="dot" style="--i:128" cx="223.9" cy="204.4" r="2.2"/><circle class="dot" style="--i:129" cx="223.6" cy="222.8" r="2.2"/><circle class="dot" style="--i:130" cx="205.1" cy="187.5" r="2.2"/><circle class="dot" style="--i:131" cx="286.0" cy="241.1" r="2.2"/><circle class="dot" style="--i:132" cx="258.0" cy="196.3" r="2.2"/><circle class="dot" style="--i:133" cx="222.4" cy="187.7" r="2.2"/><circle class="dot" style="--i:134" cx="195.8" cy="249.8" r="2.2"/><circle class="dot" style="--i:135" cx="232.9" cy="87.3" r="2.2"/><circle class="dot" style="--i:136" cx="223.3" cy="161.1" r="2.2"/><circle class="dot" style="--i:137" cx="214.5" cy="167.6" r="2.2"/><circle class="dot" style="--i:138" cx="224.0" cy="106.2" r="2.2"/><circle class="dot" style="--i:139" cx="249.6" cy="188.3" r="2.2"/><circle class="dot" style="--i:140" cx="266.7" cy="177.8" r="2.2"/><circle class="dot" style="--i:141" cx="233.4" cy="113.9" r="2.2"/><circle class="dot" style="--i:142" cx="177.8" cy="231.1" r="2.2"/><circle class="dot" style="--i:143" cx="241.2" cy="123.7" r="2.2"/><circle class="dot" style="--i:144" cx="204.4" cy="206.0" r="2.2"/><circle class="dot" style="--i:145" cx="215.0" cy="250.0" r="2.2"/><circle class="dot" style="--i:146" cx="267.1" cy="205.4" r="2.2"/><circle class="dot" style="--i:147" cx="224.2" cy="122.9" r="2.2"/><circle class="dot" style="--i:148" cx="179.0" cy="223.6" r="2.2"/><circle class="dot" style="--i:149" cx="231.6" cy="176.7" r="2.2"/><circle class="dot" style="--i:150" cx="214.1" cy="116.2" r="2.2"/><circle class="dot" style="--i:151" cx="215.1" cy="88.5" r="2.2"/><circle class="dot" style="--i:152" cx="223.0" cy="214.0" r="2.2"/><circle class="dot" style="--i:153" cx="259.5" cy="203.6" r="2.2"/>
+          </svg>
+        </div>
+        <ol class="story-steps">
+          <li data-step="1"><span class="label">01</span><h3>書く</h3><p>いつものノートに、いつものペンで。アプリに打ち直す必要はありません。</p></li>
+          <li data-step="2"><span class="label">02</span><h3>撮る</h3><p>書いたページを iPhone で撮るだけ。電波がなくても撮れて、あとでまとめて送ります。</p></li>
+          <li data-step="3"><span class="label">03</span><h3>残る</h3><p>書いた言葉は、データとして積み重なっていきます。何もしなくても、あなたが少しずつ形になっていきます。</p></li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="waitlist" id="waitlist" aria-labelledby="waitlist-title">
+      <p class="label">iPhone 版 近日公開</p>
+      <h2 id="waitlist-title">公開したら、<wbr>お知らせします。</h2>
+      <form novalidate>
+        <label class="visually-hidden" for="waitlist-email">メールアドレス</label>
+        <input id="waitlist-email" name="email" type="email" required autocomplete="email" inputmode="email" maxlength="254" placeholder="メールアドレス">
+        <button class="soon" type="submit">ウェイトリストに登録</button>
+      </form>
+      <p class="caption" role="status" aria-live="polite">メールアドレスは公開のお知らせにだけ使います。</p>
+    </section>
+  </main>
+
+  <footer>
+    <span class="wordmark">Kizamu</span>
+    <span class="caption">OMG · 2026 · <a href="https://www.instagram.com/theprototype26/" target="_blank" rel="noopener">Instagram</a></span>
+  </footer>
+</div>
+<script src="/ink.js"></script>
+<script src="/ink/fluid.js"></script>
+<script>
+  // いちばん画面の中央に近いステップへ切り替える。ただし先へ進むのは、いまの図を最後まで再生してから。
+  // 先へスクロールするほど再生を速くして、終わったら次のステップに進む。上に戻るときはすぐ切り替える
+  (() => {
+    const steps = [...document.querySelectorAll(".story-steps li")], figs = [...document.querySelectorAll(".fig")];
+    const grid = document.querySelector(".story-grid"), figure = document.querySelector(".story-figure");
+    const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    let current = null, playing = [], lastY = scrollY, freeUntil = 0;
+    // 上のバーのボタンで登録欄へ飛ぶ間は、下の「引き留め」をしない
+    document.querySelector(".top-cta").addEventListener("click", () => { freeUntil = performance.now() + 3000; });
+    // 基準線（画面の高さの 6 割）が、そのステップの中心をどれだけ通り過ぎたか。ステップの高さを 1 とする
+    function past(li) {
+      const r = li.getBoundingClientRect();
+      return (innerHeight * 0.6 - (r.top + r.bottom) / 2) / r.height;
+    }
+    function nearest() {
+      const mid = innerHeight * 0.6;
+      let best = steps[0], dist = Infinity;
+      for (const li of steps) {
+        const r = li.getBoundingClientRect(), d = Math.abs((r.top + r.bottom) / 2 - mid);
+        if (d < dist) { dist = d; best = li; }
+      }
+      return best;
+    }
+    function show(li) {
+      current = li;
+      steps.forEach((s) => s.classList.toggle("active", s === li));
+      figs.forEach((f) => f.classList.toggle("active", f.dataset.fig === li.dataset.step));
+      const fig = figs.find((f) => f.dataset.fig === li.dataset.step);
+      // 再生し終わるのを待つアニメーション。ループする page-drop は待たない
+      const mine = playing = reduce ? [] : fig.getAnimations({ subtree: true })
+        .filter((a) => a instanceof CSSAnimation && a.effect.getComputedTiming().iterations !== Infinity);
+      Promise.all(mine.map((a) => a.finished)).then(() => { if (playing === mine) { playing = []; update(); } }, () => {});
+    }
+    function update() {
+      // 最後の図が再生し終わるまでは、図の固定が外れる位置より下へ進ませない（そこでは最大の速さなので、すぐ終わる）。
+      // 上から越えようとしたときだけ引き留める。最初から下にいた場合（再読み込みなど）は何もしない
+      if (!reduce && performance.now() > freeUntil && (current !== steps.at(-1) || playing.length)) {
+        const limit = scrollY + grid.getBoundingClientRect().bottom - parseFloat(getComputedStyle(figure).top) - figure.offsetHeight;
+        if (scrollY > limit && lastY <= limit + 1) scrollTo({ top: limit, behavior: "instant" });
+      }
+      lastY = scrollY;
+      const target = nearest(), from = steps.indexOf(current), to = steps.indexOf(target);
+      if (to < from || current === null) show(target);
+      else if (to > from && !playing.length) show(steps[from + 1]);
+      // 次のステップの位置で約 4 倍、そこからさらに進むと最大 16 倍
+      let rate = Math.min(16, 1 + 8 * Math.max(0, past(current) - 0.15));
+      // 最後のステップは待たせる次がない。図の固定が外れて流れ始める位置で最大の速さになるようにして、見えているうちに終わらせる
+      if (current === steps.at(-1)) {
+        const p = past(current), left = Math.max(0, grid.getBoundingClientRect().bottom - figure.getBoundingClientRect().bottom) / current.getBoundingClientRect().height;
+        rate = p > 0 ? 1 + 15 * p / (p + left) : 1;
+      }
+      for (const a of playing) a.updatePlaybackRate(rate);
+    }
+    addEventListener("scroll", update, { passive: true });
+    addEventListener("resize", update);
+    update();
+  })();
+</script>
+<script>
+  // Vision の開閉。矢印か「閉じる」、Esc で切り替える
+  (() => {
+    const head = document.querySelector(".hero-head"), button = head.querySelector(".vision-toggle"), panel = document.getElementById("vision-panel");
+    function set(open) {
+      head.classList.toggle("open", open);
+      button.setAttribute("aria-expanded", String(open));
+      button.setAttribute("aria-label", open ? "Vision を閉じる" : "Vision を開く");
+      panel.inert = !open;
+      (open ? panel : button).focus({ preventScroll: true });
+    }
+    button.addEventListener("click", () => set(!head.classList.contains("open")));
+    panel.querySelector(".vision-close").addEventListener("click", () => set(false));
+    addEventListener("keydown", (e) => { if (e.key === "Escape" && head.classList.contains("open")) set(false); });
+  })();
+</script>
+<script>
+  // ウェイトリスト登録。Supabase の REST に直接 insert する（公開してよい publishable key。権限は RLS で insert だけ）
+  (() => {
+    const box = document.getElementById("waitlist"), form = box.querySelector("form");
+    const input = form.querySelector("input"), button = form.querySelector("button"), note = box.querySelector(".caption");
+    const label = button.textContent;
+    function say(text, error) { note.textContent = text; note.classList.toggle("error", !!error); }
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const email = input.value.trim();
+      input.value = email;
+      if (!email || !input.checkValidity()) {
+        say("メールアドレスを確かめてください。", true);
+        input.focus();
+        return;
+      }
+      button.disabled = true;
+      button.textContent = "登録しています…";
+      try {
+        const res = await fetch("https://qvmarkvwpkavliqfjcym.supabase.co/rest/v1/waitlist", {
+          method: "POST",
+          headers: { apikey: "sb_publishable_17-YqxKbkEkVX11Bi7zRqg_QyibKbnV", "Content-Type": "application/json", Prefer: "return=minimal" },
+          body: JSON.stringify({ email }),
+        });
+        // 409 は登録済み。同じ扱いにする
+        if (!res.ok && res.status !== 409) throw new Error(String(res.status));
+        box.classList.add("done");
+        say(`登録しました。公開したら ${email} にお知らせします。`);
+      } catch {
+        say("うまく登録できませんでした。時間をおいてもう一度お試しください。", true);
+        button.disabled = false;
+        button.textContent = label;
+      }
+    });
+  })();
+</script>
+<script src="/edit.js"></script>
+</body>
+</html>
